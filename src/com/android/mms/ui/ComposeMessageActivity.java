@@ -228,7 +228,7 @@ public class ComposeMessageActivity extends Activity
     private static final int MENU_DEBUG_DUMP            = 7;
     private CharSequence mSignature;        // Append text at the end of all outgoing messages
 
-+    private String mSignatureAutoAppend;    // Setting for Signature auto-appendprivate static final int MENU_APPEND_SIGNATURE      = 8;
+    private String mSignatureAutoAppend;    // Setting for Signature auto-appendprivate static final int MENU_APPEND_SIGNATURE      = 8;
 
     // Context menu ID
     private static final int MENU_VIEW_CONTACT          = 12;
