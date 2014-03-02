@@ -172,7 +172,9 @@ import com.android.mms.model.SlideModel;
 import com.android.mms.model.SlideshowModel;
 import com.android.mms.templates.TemplateGesturesLibrary;
 import com.android.mms.templates.TemplatesProvider.Template;
+import com.android.mms.transaction.MessageSender;
 import com.android.mms.transaction.MessagingNotification;
+import com.android.mms.transaction.MessageSender.AbstractCountDownSender;
 import com.android.mms.ui.MessageUtils.ResizeImageResultCallback;
 import com.android.mms.ui.RecipientsEditor.RecipientContextMenuInfo;
 import com.android.mms.util.EmojiParser;
@@ -180,6 +182,12 @@ import com.android.mms.util.SendingProgressTokenManager;
 import com.android.mms.util.SmileyParser;
 
 import android.text.InputFilter.LengthFilter;
+
+//Pick-Up-To-Call
+import android.hardware.SensorEventListener;
+import android.hardware.Sensor;
+import android.hardware.SensorEvent;
+import android.hardware.SensorManager;
 
 /**
  * This is the main UI for:
@@ -335,6 +343,13 @@ public class ComposeMessageActivity extends Activity
     private double mGestureSensitivity;
 
     private int inputMethod;
+    
+    //Pick-Up-To-Call
+    private SensorManager mSensorManager;
+    private int SensorOrientationY;
+	private int SensorProximity;
+	private boolean initProx;
+	private boolean proxChanged;
 
     @SuppressWarnings("unused")
     public static void log(String logMsg) {
@@ -1932,6 +1947,64 @@ public class ComposeMessageActivity extends Activity
             android.os.Debug.startMethodTracing("compose");
         }
     }
+    
+        //Pick-Up-To-Call
+	@Override
+	public void onSensorChanged(SensorEvent event) {
+
+		/* get event if orientation is changed, 
+		 * save Sensor event.values to check on them later
+		 */
+		switch (event.sensor.getType()) {
+
+		case Sensor.TYPE_ORIENTATION:
+			SensorOrientationY = (int) event.values[SensorManager.DATA_Y];
+			break;
+
+		case Sensor.TYPE_PROXIMITY:
+			int currentProx = (int) event.values[0];
+			if (initProx) {
+				SensorProximity = currentProx;
+				initProx = false;
+			} else {
+				if( SensorProximity > 0 && currentProx == 0){
+					proxChanged = true;
+				}
+			}
+			SensorProximity = currentProx;
+			break;
+		}
+		
+		if (rightOrientation(SensorOrientationY) && proxChanged ) {
+
+			if (getRecipients().isEmpty() == false) {
+				//unregister Listener to don't let the onSesorChanged run the whole time
+				mSensorManager.unregisterListener(this,
+						mSensorManager.getDefaultSensor(Sensor.TYPE_ORIENTATION));
+				mSensorManager.unregisterListener(this,
+						mSensorManager.getDefaultSensor(Sensor.TYPE_PROXIMITY));
+				
+				//get number and attach it to an Intent.ACTION_CALL, then start the Intent
+				String number = getRecipients().get(0).getNumber();
+				Intent dialIntent = new Intent(Intent.ACTION_CALL);
+				dialIntent.setData(Uri.fromParts("tel", number, null));
+				//dialIntent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+				startActivity(dialIntent);
+			}
+		}
+	}
+
+	@Override
+	public void onAccuracyChanged(Sensor sensor, int accuracy) {
+	}
+	
+	public boolean rightOrientation(int orinentation) {
+		if (orinentation < -65) {
+			return true;
+		} else {
+			return false;
+		}
+	}
 
     private void showSubjectEditor(boolean show) {
         if (Log.isLoggable(LogTag.APP, Log.VERBOSE)) {
@@ -2268,6 +2341,24 @@ public class ComposeMessageActivity extends Activity
                                 InputType.TYPE_TEXT_FLAG_AUTO_CORRECT|
                                 InputType.TYPE_TEXT_FLAG_CAP_SENTENCES|
                                 InputType.TYPE_TEXT_FLAG_MULTI_LINE);
+                                
+        //Pick-Up-To-Call
+        boolean motionCallEnabled = prefs.getBoolean(MessagingPreferenceActivity.MOTION_CALL_RECIPIENT, false);
+        
+        if(motionCallEnabled){
+			SensorOrientationY = 0;
+			SensorProximity = 0;
+			proxChanged = false;
+			initProx = true;
+				
+			mSensorManager = (SensorManager) getSystemService(SENSOR_SERVICE);
+			mSensorManager.registerListener(this,
+						mSensorManager.getDefaultSensor(Sensor.TYPE_ORIENTATION),
+						SensorManager.SENSOR_DELAY_UI);
+			mSensorManager.registerListener(this,
+						mSensorManager.getDefaultSensor(Sensor.TYPE_PROXIMITY),
+						SensorManager.SENSOR_DELAY_UI);
+		}
     }
 
     @Override
@@ -2282,6 +2373,18 @@ public class ComposeMessageActivity extends Activity
         removeRecipientsListeners();
 
         clearPendingProgressDialog();
+        
+        //Pick-Up-To-Call
+		SharedPreferences prefs = PreferenceManager
+                .getDefaultSharedPreferences((Context) ComposeMessageActivity.this);
+        boolean motionCallEnabled = prefs.getBoolean(MessagingPreferenceActivity.MOTION_CALL_RECIPIENT, false);
+        
+        if(motionCallEnabled){
+			mSensorManager.unregisterListener(this,
+						mSensorManager.getDefaultSensor(Sensor.TYPE_ORIENTATION));
+			mSensorManager.unregisterListener(this,
+						mSensorManager.getDefaultSensor(Sensor.TYPE_PROXIMITY));
+		}
     }
 
     @Override
@@ -2544,6 +2647,15 @@ public class ComposeMessageActivity extends Activity
             }
             startMsgListQuery();
         }
+    }
+
+    public void onMessageCountDownTick() {
+        // Do the same query as if we sent the message, instead here we force it (refresh everything)
+        runOnUiThread(new Runnable() {
+            public void run() {
+                startMsgListQuery();
+            }
+        });
     }
 
     public void onMaxPendingMessagesReached() {
@@ -3590,7 +3702,23 @@ public class ComposeMessageActivity extends Activity
         mMsgListView.setOnItemClickListener(new AdapterView.OnItemClickListener() {
             public void onItemClick(AdapterView<?> parent, View view, int position, long id) {
                 if (view != null) {
-                    ((MessageListItem) view).onMessageListItemClick();
+                    if(!isCursorValid()) {
+                        return;
+                    }
+                    Cursor cursor = mMsgListAdapter.getCursor();
+                    String type = cursor.getString(COLUMN_MSG_TYPE);
+                    long msgId = cursor.getLong(COLUMN_ID);
+                    MessageItem msgItem = mMsgListAdapter.getCachedMessageItem(type, msgId, cursor);
+                    AbstractCountDownSender countDownSender = MessageSender.mCountDownSenders.get(msgItem.mDate);
+                    if(msgItem != null && msgItem.isSending() && countDownSender != null) {
+                            editMessageItem(msgItem);
+                            drawBottomPanel();
+                            countDownSender.cancel();
+                            MessageSender.mCountDownSenders.remove(countDownSender);
+                            Log.d(TAG, "Cancelling countdown for message "+msgId);
+                    } else {
+                        ((MessageListItem) view).onMessageListItemClick();
+                    }
                 }
             }
         });
